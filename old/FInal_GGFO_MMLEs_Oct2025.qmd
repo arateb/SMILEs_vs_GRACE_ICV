@@ -1,0 +1,958 @@
+---
+title: "Untitled"
+format: html
+---
+
+
+```{r Packages}
+# Core tidyverse and data handling
+library(tidyverse)
+library(dplyr)
+library(data.table)
+library(readr)
+library(readxl)
+library(lubridate)
+library(reshape2)
+
+# Visualization
+library(ggplot2)
+library(ggthemes)
+library(ggdist)
+library(ggridges)
+library(gghalves)
+library(viridis)
+library(scico)
+library(scales)
+library(patchwork)
+library(corrplot)
+# Spatial analysis
+library(sf)
+library(sp)
+library(gstat)
+library(raster)
+# Modeling and machine learning
+library(mgcv)
+library(DiceKriging)
+library(GPfit)
+library(caret)
+library(brms)
+library(bsts)
+# Extreme value and statistical analysis
+library(extRemes)
+library(exdex)
+library(pracma)
+library(scoringRules)
+
+# Time series and entropy analysis
+library(tsibble)
+library(crqa)
+library(TSEntropies)
+
+# MATLAB and array utilities
+library(R.matlab)
+library(abind)
+use_scico <- requireNamespace("scico", quietly = TRUE)
+```
+```{r}
+# read the data 
+setwd("/Volumes/lab/projs/2025/CESM_TWS/C0_GGFO_Vs_MMLEs")
+G<-readRDS("analysis/GGFo_vs_MMILEs_Comparison_UpdatedAug25.rds")
+ampl_aug<-G$newAmplitude_results_aug
+amplsd_aug<-G$updated_AMp_SD_Min_MAC
+Summaryamplsd_aug<-G$updated_SummaryAMP_SD_Min_MAC
+ shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+shp <- st_make_valid(shp)                 # GEOS repair
+cen <- st_centroid(shp)                   # mathematical centroid (not just a la
+# 4. Re-project centroid to geographic coords (EPSG 4326) ----------------------
+cen_ll <- st_transform(cen, 4326)         # now in degrees    # adds X, Y # 5. Extract numeric columns and bind to attributes ----------------------------
+coords <- st_coordinates(cen_ll)          # matrix with X = lon, Y = lat
+out    <- cbind(st_drop_geometry(shp), 
+                lon = coords[, "X"],
+                lat = coords[, "Y"]) 
+
+basins_sf=shp
+
+# ---- your Nature helpers (source your provided block first) ----
+# source("R/nature_theme_and_maps.R")   # contains theme_nature(), plot_robin_map(), plot_cesm_robin(), etc.
+
+# ---- inputs assumed in memory ----
+# amplsd_aug          # tibble with per-basin metrics + list columns amp_ens, sd_ens, min_ens, max_ens
+# basins_sf           # sf polygon layer for global basins; must contain 'bd_ID' for join
+# Optional: Summaryamplsd_aug (used where present)
+
+# ---- id columns and constants ----
+ID_COL   <- "bd_ID"             # basin key in amplsd_aug and basins_sf
+MODEL_COL<- "model_name"        # 'CESM2' or 'IPSL'
+OBS_COLS <- c("amp_grace","sd_grace","min_grace","max_grace")
+
+# classification thresholds
+RATIO_OK_LO  <- 0.8
+RATIO_OK_HI  <- 1.2
+RATIO_TIGHT_LO <- 0.85
+RATIO_TIGHT_HI <- 1.15
+# base figure settings (Nature)
+BASE_SIZE <- 6     # 5–7 pt
+BASE_FONT <- "Helvetica"  # falls back to "sans" inside theme_nature()
+       # precomputed summaries
+basins_sf    <- shp #basins shapefile with column bd_ID
+out_dir      <- "/Volumes/lab/projs/2025/CESM_TWS/C0_GGFO_Vs_MMLEs/analysis/Oct25"                          # <- will be created if missing
+
+
+
+
+```
+
+
+
+ ```{r Functions}
+std_cols <- function(d,
+                     id_candidates    = c("bd_ID", "BD_ID", "bd_id", "ID", "OBJECTID"),
+                     model_candidates = c("model_name", "model", "Model", "source")) {
+  if (is.null(d)) return(d)
+  stopifnot(is.data.frame(d) || inherits(d, "sf"))
+  
+  nm <- names(d)
+  
+  # id column
+  id_col <- intersect(id_candidates, nm)
+  if (length(id_col) == 0L) {
+    stop("std_cols: could not find a basin id column among: ", paste(id_candidates, collapse=", "))
+  } else if (id_col[1] != "bd_ID") {
+    d <- d %>% dplyr::rename(bd_ID = !!rlang::sym(id_col[1]))
+  }
+  
+  # model column (optional in shapefile, present in metrics)
+  model_col <- intersect(model_candidates, nm)
+  if (length(model_col) > 0L && model_col[1] != "model_name") {
+    d <- d %>% dplyr::rename(model_name = !!rlang::sym(model_col[1]))
+  }
+  
+  # ensure types
+  if ("bd_ID" %in% names(d))    d$bd_ID    <- as.character(d$bd_ID)
+  if ("model_name" %in% names(d)) d$model_name <- as.character(d$model_name)
+  
+  d
+}
+amplsd_aug <- std_cols(amplsd_aug)
+basins_sf  <- std_cols(basins_sf)
+safe_ratio <- function(obs, med) {
+  ifelse(is.finite(obs) & is.finite(med) & med != 0, obs/med, NA_real_)
+}
+
+# Midrank PIT for a single observed value vs a numeric vector (ensemble members)
+pit_midrank_one <- function(obs, vals) {
+  vals <- vals[is.finite(vals)]
+  n <- length(vals)
+  if (n == 0L || !is.finite(obs)) return(NA_real_)
+  # midrank percentile (ties handled)
+  u <- (sum(vals < obs) + 0.5 * sum(vals == obs)) / n
+  as.numeric(u)
+}
+
+list_median  <- function(x) if (length(x)) median(unlist(x), na.rm = TRUE) else NA_real_
+list_q       <- function(x, p) if (length(x)) as.numeric(stats::quantile(unlist(x), probs = p, na.rm = TRUE, type = 7)) else NA_real_
+list_frac_in <- function(x, lo, hi) {
+  if (length(x) == 0L) return(NA_real_)
+  v <- unlist(x); mean(v >= lo & v <= hi, na.rm = TRUE)
+}
+list_frac_le <- function(x, thr) { if (length(x)) mean(unlist(x) <= thr, na.rm = TRUE) else NA_real_ }
+list_frac_ge <- function(x, thr) { if (length(x)) mean(unlist(x) >= thr, na.rm = TRUE) else NA_real_ }
+
+
+ ```
+
+# 1 What we will (and won’t) do, per your request
+Q1 Coverage: GRACE amplitude & σ inside 5–95% ensemble envelope per basin
+Q2 Bias direction: under/over‑dispersion maps & counts
+Q3 Joint adequacy: amplitude vs σ (both inside 0.8–1.2?)
+Q4 Member realism: share of members within ±20% of GRACE (amp & σ)
+Q5 PIT ranks (u) for amplitude/σ across basins (uniformity check)
+Q6 Controls: ratios vs basin size, aridity class, irrigation fraction
+Q7 Robustness: compare 0.8–1.2 vs 0.85–1.15 success windows
+Q8 Extremes coverage: fraction of members that reach GRACE min / max
+Q9 Extreme tail distance: dIQR, dMAD summaries
+Q10 Asymmetry: pluvial vs drought coverage gap
+Q11 Dispersion–extremes link: correlation between ratios and coverage
+Q12 Population exceedance: share of basins where GRACE exceeds model q50, q75, q90, q95, q99 (amp & σ)
+Q17 Cross‑model consistency: overlap in failure basins
+Deferred (timeseries‑heavy; you told me to remove):
+Q13, Q14, Q15, Q16, Q18 (phase space topology, KL divergence, DOF, scaling, spectral partitioning)
+# Functions
+
+```{r  0 Libraries, helpers, and Nature plotting utilities}
+# ---- packages ----
+prep_metrics <- function(M) {
+  stopifnot(all(c("bd_ID","model_name") %in% names(M)))
+  
+  M %>%
+    mutate(
+      # Robust medians (fallback to list cols if precomputed columns missing)
+      median_amp = if ("median_amp" %in% names(M)) median_amp else map_dbl(amp_ens, list_median),
+      median_sd  = if ("median_sd"  %in% names(M)) median_sd  else map_dbl(sd_ens,  list_median),
+      q5_amp     = if ("q5_amp"     %in% names(M)) q5_amp     else map_dbl(amp_ens, ~list_q(.x, 0.05)),
+      q95_amp    = if ("q95_amp"    %in% names(M)) q95_amp    else map_dbl(amp_ens, ~list_q(.x, 0.95)),
+      q5_sd      = if ("q5_sd"      %in% names(M)) q5_sd      else map_dbl(sd_ens,  ~list_q(.x, 0.05)),
+      q95_sd     = if ("q95_sd"     %in% names(M)) q95_sd     else map_dbl(sd_ens,  ~list_q(.x, 0.95)),
+      
+      # Q1/Q2/Q3 – ratios
+      ratio_amp  = safe_ratio(amp_grace, median_amp),
+      ratio_sd   = safe_ratio(sd_grace,  median_sd),
+      class20_amp = case_when(ratio_amp > 1.2 ~ "Under‑dispersed (too small)",
+                              ratio_amp < 0.8 ~ "Over‑dispersed (too large)",
+                              TRUE ~ "Within 0.8–1.2"),
+      class20_sd  = case_when(ratio_sd  > 1.2 ~ "Under‑dispersed (too small)",
+                              ratio_sd  < 0.8 ~ "Over‑dispersed (too large)",
+                              TRUE ~ "Within 0.8–1.2"),
+      # Q1 coverage inside 5–95%
+      cover_amp_5_95 = ifelse(is.finite(amp_grace) & is.finite(q5_amp) & is.finite(q95_amp),
+                              as.integer(amp_grace >= q5_amp & amp_grace <= q95_amp), NA_integer_),
+      cover_sd_5_95  = ifelse(is.finite(sd_grace) & is.finite(q5_sd) & is.finite(q95_sd),
+                              as.integer(sd_grace >= q5_sd & sd_grace <= q95_sd), NA_integer_),
+      
+      # Q4 – member realism share within ±20% of GRACE
+      frac_amp_20 = map2_dbl(amp_ens, amp_grace, ~{
+        if (!is.finite(.y)) return(NA_real_)
+        lo <- 0.8 * .y; hi <- 1.2 * .y; list_frac_in(.x, lo, hi)
+      }),
+      frac_sd_20  = map2_dbl(sd_ens, sd_grace, ~{
+        if (!is.finite(.y)) return(NA_real_)
+        lo <- 0.8 * .y; hi <- 1.2 * .y; list_frac_in(.x, lo, hi)
+      }),
+      
+      # Q5 – PIT u for amplitude/σ
+      u_amp = map2_dbl(amp_grace, amp_ens, pit_midrank_one),
+      u_sd  = map2_dbl(sd_grace,  sd_ens,  pit_midrank_one),
+      
+      # Q8 – extreme coverage (fraction of members reaching realized GRACE min/max)
+      frac_min_cover = map2_dbl(min_ens, min_grace, ~list_frac_le(.x, .y)),
+      frac_max_cover = map2_dbl(max_ens, max_grace, ~list_frac_ge(.x, .y)),
+      
+      # Q9 – tail distances (use your precomputed if present; otherwise NA)
+      dIQR_min = if ("dIQR_min" %in% names(M)) dIQR_min else NA_real_,
+      dIQR_max = if ("dIQR_max" %in% names(M)) dIQR_max else NA_real_,
+      dMAD_min = if ("dMAD_min" %in% names(M)) dMAD_min else NA_real_,
+      dMAD_max = if ("dMAD_max" %in% names(M)) dMAD_max else NA_real_,
+      
+      # convenience (controls)
+      Area_km2 = as.numeric(Area_km2),
+      Irrig_pct = as.numeric(Irrig_pct),
+      Arid = as.character(Arid)
+    ) %>%
+    # keep only what we need for plots
+    dplyr::select(
+      bd_ID, model_name, River, C_lon, C_lat, Area_km2, Arid, Irrig_pct,
+      amp_grace, sd_grace, min_grace, max_grace,
+      median_amp, median_sd, ratio_amp, ratio_sd,
+      class20_amp, class20_sd, cover_amp_5_95, cover_sd_5_95,
+      frac_amp_20, frac_sd_20, u_amp, u_sd,
+      frac_min_cover, frac_max_cover,
+      dIQR_min, dIQR_max, dMAD_min, dMAD_max
+    )
+}
+MET <- prep_metrics(amplsd_aug)
+merge_to_sf <- function(sf_basins, metrics, keep_cols) {
+  stopifnot(inherits(sf_basins, "sf"))
+  # only requested columns + keys
+  met <- metrics %>% dplyr::select(bd_ID, model_name, dplyr::all_of(keep_cols))
+  
+  sf_basins %>%
+    inner_join(met, by = "bd_ID")  # only basins with data
+}
+
+ ratio_scale_cols <- c("#2166AC", "#F7F7F7", "#B2182B") 
+
+```
+# Plot the questions
+```{r 1 Q1 — ICV coverage (Does GRACE amplitude and σ fall inside the 5–95% ensemble envelope?)}
+#What is plotted
+#(a) Map of amplitude coverage (binary inside 5–95% vs. outside), faceted by model.
+#(b) Map of σ coverage (same).
+#(c) Bar summaries (share covered vs. not) #per model and metric.
+fig_Q1_ratio_maps <- function(MET, basins_sf, out_file = "Q1_ratio_maps.pdf") {
+  # Build sf layers for each panel
+  sf_amp_cesm <- merge_to_sf(basins_sf, MET %>% filter(model_name == "CESM2"),
+                             keep_cols = c("ratio_amp"))
+  sf_amp_ipsl <- merge_to_sf(basins_sf, MET %>% filter(model_name == "IPSL"),
+                             keep_cols = c("ratio_amp"))
+  sf_sd_cesm  <- merge_to_sf(basins_sf, MET %>% filter(model_name == "CESM2"),
+                             keep_cols = c("ratio_sd"))
+  sf_sd_ipsl  <- merge_to_sf(basins_sf, MET %>% filter(model_name == "IPSL"),
+                             keep_cols = c("ratio_sd"))
+  
+  p1 <- plot_robin_map(sf_amp_cesm, fill_var = "ratio_amp",
+                       scale_limits = c(0.5, 2), scale_midpoint = 1,
+                       scale_colors = ratio_scale_cols,
+                       scale_breaks = c(0.5, 0.75, 1, 1.5, 2),
+                       scale_labels = c("0.5","0.75","1","1.5","2"),
+                       scale_name = "Obs / Ensemble median") +
+        labs(title = "a  CESM2 — Amplitude ratio (Obs/Ens)") +
+        theme_nature_map()
+  
+  p2 <- plot_robin_map(sf_amp_ipsl, fill_var = "ratio_amp",
+                       scale_limits = c(0.5, 2), scale_midpoint = 1,
+                       scale_colors = ratio_scale_cols,
+                       scale_breaks = c(0.5, 0.75, 1, 1.5, 2),
+                       scale_labels = c("0.5","0.75","1","1.5","2"),
+                       scale_name = "Obs / Ensemble median") +
+        labs(title = "b  IPSL — Amplitude ratio (Obs/Ens)") +
+        theme_nature_map()
+  
+  p3 <- plot_robin_map(sf_sd_cesm, fill_var = "ratio_sd",
+                       scale_limits = c(0.5, 2), scale_midpoint = 1,
+                       scale_colors = ratio_scale_cols,
+                       scale_breaks = c(0.5, 0.75, 1, 1.5, 2),
+                       scale_labels = c("0.5","0.75","1","1.5","2"),
+                       scale_name = "Obs / Ensemble median") +
+        labs(title = "c  CESM2 — σ ratio (Obs/Ens)") +
+        theme_nature_map()
+  
+  p4 <- plot_robin_map(sf_sd_ipsl, fill_var = "ratio_sd",
+                       scale_limits = c(0.5, 2), scale_midpoint = 1,
+                       scale_colors = ratio_scale_cols,
+                       scale_breaks = c(0.5, 0.75, 1, 1.5, 2),
+                       scale_labels = c("0.5","0.75","1","1.5","2"),
+                       scale_name = "Obs / Ensemble median") +
+        labs(title = "d  IPSL — σ ratio (Obs/Ens)") +
+        theme_nature_map()
+  
+  fig <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+  save_nature_figure(fig, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(fig)
+}
+
+fig_Q1_ratio_maps(MET, basins_sf, file.path(out_dir, "Q1_ratio_maps.pdf"))
+
+```
+
+```{r Q2 — ICV bias structure (Under‑dispersion vs over‑dispersion of amplitude and σ)}
+#What is plotted
+#
+#(a) Map of amplitude ratio = GRACE / #ensemble median (diverging about #1; #under‑dispersion > 1.2; over‑dispersion < 0.#8), by model.
+#(b) Map of σ ratio (same).
+#(c) Stacked counts by class (“Under‑dispersive”, “Adequate","Overdisp")
+fig_Q2_dispersion_class_maps <- function(MET, basins_sf, out_file = "Q2_dispersion_class_maps.pdf") {
+  key_cols <- c("class20_amp","class20_sd")
+  
+  lab_cols <- c("Under‑dispersed (too small)" = "#1f78b4",
+                "Within 0.8–1.2"               = "#aaaaaa",
+                "Over‑dispersed (too large)"   = "#e31a1c")
+  
+  make_panel <- function(model, var, title) {
+    sfm <- merge_to_sf(basins_sf, MET %>% filter(model_name == model),
+                       keep_cols = var)
+    v <- var
+    ggplot() +
+      get_world_robin()$geoms$world +
+      geom_sf(data = st_transform(sfm, robin_crs()),
+              aes_string(fill = v), color = NA, size = 0.1) +
+      scale_fill_manual(values = lab_cols, name = NULL, drop = FALSE) +
+      coord_sf(crs = robin_crs(), expand = FALSE) +
+      theme_nature_map() +
+      labs(title = title)
+  }
+  
+  p1 <- make_panel("CESM2", "class20_amp", "a  CESM2 — Amplitude class (0.8–1.2)")
+  p2 <- make_panel("IPSL",  "class20_amp", "b  IPSL  — Amplitude class (0.8–1.2)")
+  p3 <- make_panel("CESM2", "class20_sd",  "c  CESM2 — σ class (0.8–1.2)")
+  p4 <- make_panel("IPSL",  "class20_sd",  "d  IPSL  — σ class (0.8–1.2)")
+  
+  fig <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+  save_nature_figure(fig, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(fig)
+}
+
+
+fig_Q2_dispersion_class_maps(MET, basins_sf, file.path(out_dir, "Q2_dispersion_class_maps.pdf"))
+
+```
+
+```{r Q3 — Joint adequacy (Do basins matching σ also match amplitude?)}
+# What is plotted
+#(a) Scatter of ratio_amp vs ratio_sd with 0.8–1.2 box; points colored by #adequacy class; faceted by model.
+#(b) Count/percentage in each quadrant relative to the box (misallocation #diagnostic).fig_Q3_joint_scatter <- function(M, out_file = NULL){
+fig_Q3_joint_adequacy <- function(MET, out_file = "Q3_joint_adequacy_scatter.pdf") {
+  box <- data.frame(xmin = 0.8, xmax = 1.2, ymin = 0.8, ymax = 1.2)
+  p <- ggplot(MET, aes(x = ratio_amp, y = ratio_sd, color = model_name)) +
+    geom_rect(data = box, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+              inherit.aes = FALSE, fill = NA, color = "black", linetype = "dashed") +
+    geom_point(alpha = 0.6, size = 1) +
+    scale_x_continuous("Amplitude ratio (Obs/Ens median)", limits = c(0.3, 3), trans = "log10") +
+    scale_y_continuous("σ ratio (Obs/Ens median)", limits = c(0.3, 3), trans = "log10") +
+    scale_color_nature(name = "Model") +
+    theme_nature() +
+    labs(title = "Joint dispersion adequacy: amplitude vs σ")
+  
+  save_nature_figure(p, out_file, width_type = "single", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q3_joint_adequacy(MET, file.path(out_dir, "Q3_joint_adequacy_scatter.pdf"))
+```
+
+```{r 4  Q4 — Member realism (Share of members within ±20% of GRACE)}
+#What is plotted
+#(a) Map of fraction of members within ±20% for amplitude, by model.
+#(b) Same for σ.
+#(c) Distributions of these fractions (per model).#
+fig_Q4_member_realism <- function(MET, basins_sf, out_file = "Q4_member_realism_maps.pdf") {
+  # binning for fractions
+  bin_fun <- function(x) cut(x,
+                             breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1.0001),
+                             labels = c("0%", "0–25%", "25–50%", "50–75%", "75–100%"),
+                             right = FALSE)
+  
+  D <- MET %>%
+    mutate(bin_amp = bin_fun(frac_amp_20),
+           bin_sd  = bin_fun(frac_sd_20))
+  
+  pal <- c("0%"="#f7f7f7","0–25%"="#d9edf7","25–50%"="#a6cee3","50–75%"="#1f78b4","75–100%"="#08306b")
+  
+  make_panel <- function(model, var, ttl) {
+    sfm <- merge_to_sf(basins_sf, D %>% filter(model_name == model),
+                       keep_cols = c(var))
+    ggplot() +
+      get_world_robin()$geoms$world +
+      geom_sf(data = st_transform(sfm, robin_crs()),
+              aes_string(fill = var), color = NA, size = 0.1) +
+      scale_fill_manual(values = pal, name = "Share of members", drop = FALSE) +
+      coord_sf(crs = robin_crs(), expand = FALSE) +
+      theme_nature_map() +
+      labs(title = ttl)
+  }
+  
+  p1 <- make_panel("CESM2","bin_amp","a  CESM2 — Amplitude, members within ±20% of GRACE")
+  p2 <- make_panel("IPSL", "bin_amp","b  IPSL  — Amplitude, members within ±20% of GRACE")
+  p3 <- make_panel("CESM2","bin_sd", "c  CESM2 — σ, members within ±20% of GRACE")
+  p4 <- make_panel("IPSL", "bin_sd", "d  IPSL  — σ, members within ±20% of GRACE")
+  
+  fig <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+  save_nature_figure(fig, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(fig)
+}
+fig_Q4_member_realism(MET, basins_sf, file.path(out_dir, "Q4_member_realism_maps.pdf"))
+```
+
+
+```{r  5 Q5 — Calibration (rank/PIT tests)}
+#What is plotted
+#(a) PIT histograms of amplitude and σ (by model) — uniform target.
+#(b) PIT scatter (amp vs σ) to screen for systematic tails. 
+fig_Q5_PIT_hist <- function(MET, out_file = "Q5_PIT_hist.pdf") {
+  D <- MET %>%
+    dplyr::select(model_name, u_amp, u_sd) %>%
+    pivot_longer(cols = c(u_amp, u_sd), names_to = "metric", values_to = "u") %>%
+    filter(is.finite(u)) %>%
+    mutate(metric = ifelse(metric == "u_amp", "Amplitude", "σ"))
+  
+  p <- ggplot(D, aes(x = u)) +
+    geom_histogram(boundary = 0, bins = 20) +
+    facet_grid(metric ~ model_name) +
+    labs(x = "PIT rank (0–1)", y = "Count",
+         title = "PIT histograms (uniform is ideal)") +
+    theme_nature()
+  
+  save_nature_figure(p, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q5_PIT_hist(MET, file.path(out_dir, "Q5_PIT_hist.pdf"))
+
+```
+
+```{r  Q6 — Controls (How do ratios vary with basin size, aridity, irrigation?)}
+# What is plotted
+#(a) ratio_amp vs log10(Area_km2) with loess; faceted by model.
+#(b) Boxplots of ratio_amp by aridity class (and similarly for σ).
+#(c) ratio_amp vs irrigation fraction with loess.
+
+# make_Q6_figure <- function(M, out_dir){
+  fig_Q6_controls <- function(MET, out_file = "Q6_controls.pdf") {
+  D <- MET %>%
+    mutate(size_class = cut(Area_km2,
+                            breaks = c(0, 1e5, 3e5, 1e6, Inf),
+                            labels = c("<0.1M", "0.1–0.3M", "0.3–1M", ">1M"),
+                            right = FALSE))
+  
+  p1 <- ggplot(D, aes(x = size_class, y = ratio_sd, color = model_name)) +
+    geom_hline(yintercept = 1, linetype="dashed") +
+    geom_boxplot(outlier.size = 0.5) +
+    scale_y_continuous("σ ratio (Obs/Ens)", trans = "log10", limits = c(0.3, 3)) +
+    scale_color_nature() +
+    labs(x = "Basin size (km² class)", title = "σ ratio vs basin size") +
+    theme_nature()
+  
+  p2 <- ggplot(D, aes(x = Arid, y = ratio_sd, color = model_name)) +
+    geom_hline(yintercept = 1, linetype="dashed") +
+    geom_boxplot(outlier.size = 0.5) +
+    scale_y_continuous("σ ratio (Obs/Ens)", trans = "log10", limits = c(0.3, 3)) +
+    scale_color_nature() +
+    labs(x = "Climate class (Arid code)", title = "σ ratio vs aridity") +
+    theme_nature()
+  
+  p3 <- ggplot(D, aes(x = Irrig_pct, y = ratio_sd, color = model_name)) +
+    geom_hline(yintercept = 1, linetype="dashed") +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.4) +
+    scale_color_nature() +
+    labs(x = "Irrigation fraction", y = "σ ratio (Obs/Ens)", title = "σ ratio vs irrigation") +
+    theme_nature()
+  
+  fig <- grid.arrange(p1, p2, p3, ncol = 3)
+  save_nature_figure(fig, out_file, width_type = "double", dpi = 400, format = "pdf")
+
+  invisible(fig)
+}
+fig_Q6_controls(MET, file.path(out_dir, "Q6_controls.pdf"))
+
+```
+
+```{r 7 Q7 — Robustness to success window (0.8–1.2 vs 0.85–1.15)}
+#What is plotted
+#(a) Bars of failure fraction under both windows for amplitude and σ, by #model.
+#(b) Δ(failure) between windows.
+fig_Q7_robustness <- function(MET, out_file = "Q7_robustness.pdf") {
+  cls <- function(r, lo, hi) ifelse(r > hi, "Under", ifelse(r < lo, "Over", "OK"))
+  D <- MET %>%
+    mutate(
+      c1_amp = cls(ratio_amp, 0.8, 1.2), c1_sd = cls(ratio_sd, 0.8, 1.2),
+      c2_amp = cls(ratio_amp, 0.85, 1.15), c2_sd = cls(ratio_sd, 0.85, 1.15),
+      flip_amp = c1_amp != c2_amp, flip_sd = c1_sd != c2_sd
+    )
+  
+  S <- D %>%
+    group_by(model_name) %>%
+    summarize(
+      amp_flip_rate = mean(flip_amp, na.rm = TRUE),
+      sd_flip_rate  = mean(flip_sd,  na.rm = TRUE)
+    ) %>% pivot_longer(cols = c(amp_flip_rate, sd_flip_rate),
+                       names_to = "metric", values_to = "flip_rate")
+  
+  p <- ggplot(S, aes(x = model_name, y = 100*flip_rate, fill = metric)) +
+    geom_col(position = position_dodge(width = 0.6), width = 0.6) +
+    scale_fill_nature(labels = c("Amplitude", "σ"), name = "Metric") +
+    labs(x = NULL, y = "Changed class (%)",
+         title = "Robustness of classification when tightening to 0.85–1.15") +
+    theme_nature()
+  
+  save_nature_figure(p, out_file, width_type = "single", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q7_robustness(MET, file.path(out_dir, "Q7_robustness.pdf"))
+```
+
+```{r 8) Q8 — Extreme coverage (fraction of members that reach GRACE min/max)}
+#What is plotted
+
+#(a) Map of drought coverage = fraction of members with min ≤ GRACE min.
+#(b) Map of pluvial coverage = fraction of members with max ≥ GRACE max.
+#(c) Side‑by‑side densities of coverage distributions by model (drought #vs pluvial).
+fig_Q8_extreme_coverage_maps <- function(MET, basins_sf, out_file = "Q8_extreme_coverage_maps.pdf") {
+  bin_fun <- function(x) cut(x,
+                             breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1.0001),
+                             labels = c("0%", "0–25%", "25–50%", "50–75%", "75–100%"),
+                             right = FALSE)
+  pal <- c("0%"="#f7f7f7","0–25%"="#fde0dd","25–50%"="#fa9fb5","50–75%"="#c51b8a","75–100%"="#49006a")
+  
+  D <- MET %>% mutate(bin_min = bin_fun(frac_min_cover),
+                      bin_max = bin_fun(frac_max_cover))
+  
+  make_panel <- function(model, var, ttl) {
+    sfm <- merge_to_sf(basins_sf, D %>% filter(model_name == model),
+                       keep_cols = var)
+    ggplot() +
+      get_world_robin()$geoms$world +
+      geom_sf(data = st_transform(sfm, robin_crs()),
+              aes_string(fill = var), color = NA, size = 0.1) +
+      scale_fill_manual(values = pal, name = "Share of members", drop = FALSE) +
+      coord_sf(crs = robin_crs(), expand = FALSE) +
+      theme_nature_map() +
+      labs(title = ttl)
+  }
+  
+  p1 <- make_panel("CESM2","bin_min","a  CESM2 — Drought minima coverage")
+  p2 <- make_panel("IPSL", "bin_min","b  IPSL  — Drought minima coverage")
+  p3 <- make_panel("CESM2","bin_max","c  CESM2 — Pluvial maxima coverage")
+  p4 <- make_panel("IPSL", "bin_max","d  IPSL  — Pluvial maxima coverage")
+  
+  fig <- grid.arrange(p1, p2, p3, p4, ncol = 2)
+  save_nature_figure(fig, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(fig)
+}
+
+```
+
+
+```{r 9 Q9 — Tail distance severity (dIQR, dMAD)}
+#What is plotted
+#(a) Maps of dIQR_min (drought) and dIQR_max (pluvial) if available; fallback: compute normalized exceedance.
+#(b) Density/box of dIQR by model and tail.
+#Your table includes dIQR_min, dIQR_max, dMAD_min, dMAD_max. We use them #directly.fig_Q9_tail_distance <- function(M, out_file = NULL){
+  # If your table already has dIQR_min, dIQR_max, dMAD_min, dMAD_max:
+fig_Q9_tail_distance <- function(MET, out_file = "Q9_tail_distance.pdf") {
+  D <- MET %>%
+    dplyr::select(model_name, dIQR_min, dIQR_max, dMAD_min, dMAD_max) %>%
+    pivot_longer(everything(), names_to = "metric", values_to = "val") %>%
+    separate(metric, into = c("stat","tail"), sep = "_") %>%
+    mutate(tail = ifelse(tail == "min", "Drought (min)", "Pluvial (max)"),
+           stat = ifelse(stat == "dIQR", "Distance in IQR units", "Distance in MAD units")) %>%
+    filter(is.finite(val))
+  
+  p <- ggplot(D, aes(x = val, fill = model_name)) +
+    geom_density(alpha = 0.5) +
+    facet_grid(stat ~ tail, scales = "free_x") +
+    labs(x = "Distance (normalized)", y = "Density",
+         title = "How far outside the ensemble envelope are realized extremes?") +
+    scale_fill_nature(name = "Model") +
+    theme_nature()
+  
+  save_nature_figure(p, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(p)
+}
+
+```
+
+```{r 10 Q10 — Pluvial vs drought asymmetry }
+##What is plotted
+#(a) Map of (pluvial coverage − drought coverage); negative = pluvials harder.
+#(b) Paired distributions of coverage by tail.#
+fig_Q10_asymmetry <- function(MET, out_file = "Q10_asymmetry.pdf") {
+  D <- MET %>%
+    mutate(diff_cover = frac_max_cover - frac_min_cover)
+  
+  p <- ggplot(D, aes(x = diff_cover, fill = model_name)) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_density(alpha = 0.5) +
+    labs(x = "Pluvial coverage − Drought coverage",
+         y = "Density", title = "Extreme asymmetry (positive = pluvials harder)") +
+    scale_fill_nature(name = "Model") +
+    theme_nature()
+  
+  save_nature_figure(p, out_file, width_type = "single", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q10_asymmetry(MET, file.path(out_dir, "Q10_asymmetry.pdf"))
+```
+
+```{r 11 Q11 — Dispersion–extreme link}
+#What is plotted
+#(a) Scatter: ratio_amp vs pluvial coverage (expected negative slope when #ratio>1 means under‑dispersion)
+#(b) Scatter: ratio_sd vs drought coverage
+#In‑panel regression and annotated ρ per model.fig_Q11_dispersion_link <- 
+fig_Q11_dispersion_extreme_link <- function(MET, out_file = "Q11_dispersion_extreme_link.pdf") {
+  # correlation per model
+  C <- MET %>%
+    group_by(model_name) %>%
+    summarize(
+      cor_amp_max = cor(ratio_amp, frac_max_cover, use = "complete.obs"),
+      cor_sd_max  = cor(ratio_sd,  frac_max_cover, use = "complete.obs"),
+      cor_amp_min = cor(ratio_amp, frac_min_cover, use = "complete.obs"),
+      cor_sd_min  = cor(ratio_sd,  frac_min_cover, use = "complete.obs")
+    )
+  print(C)
+  
+  p <- ggplot(MET, aes(x = ratio_sd, y = frac_max_cover, color = model_name)) +
+    geom_point(alpha = 0.6, size = 1) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.4) +
+    scale_x_continuous("σ ratio (Obs/Ens)", trans = "log10", limits = c(0.3, 3)) +
+    scale_y_continuous("Pluvial max coverage") +
+    scale_color_nature(name = "Model") +
+    theme_nature() +
+    labs(title = "Under‑dispersion vs pluvial coverage")
+  
+  save_nature_figure(p, out_file, width_type = "single", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q11_dispersion_extreme_link(MET, file.path(out_dir, "Q11_dispersion_extreme_link.pdf"))
+
+```
+
+```{r 12 Q12 — Population exceedance}
+# What is plotted
+#(a) Lines of exceedance share vs. percentile (q50, q75, q90, q95, q99) #for Amplitude, σ, Drought minima, Pluvial maxima, by model.
+#Your Summaryamplsd_aug$exceedance table already contains these. This #function will prefer that table; if absent, it derives them from the #quantiles in amplsd_aug
+fig_Q12_population_exceedance <- function(M, out_file = "Q12_population_exceedance.pdf") {
+  need <- c("q50_amp","q75_amp","q90_amp","q95_amp","q99_amp","amp_grace","model_name")
+  if (!all(need %in% names(M))) {
+    warning("Q12: required amp quantiles not in data; skipping.")
+    return(invisible(NULL))
+  }
+  D <- M %>%
+    transmute(model_name, amp_grace,
+              q50 = amp_grace > q50_amp,
+              q75 = amp_grace > q75_amp,
+              q90 = amp_grace > q90_amp,
+              q95 = amp_grace > q95_amp,
+              q99 = amp_grace > q99_amp) %>%
+    pivot_longer(cols = starts_with("q"), names_to = "quant", values_to = "exceed") %>%
+    group_by(model_name, quant) %>%
+    summarize(frac = mean(exceed, na.rm = TRUE), .groups = "drop") %>%
+    mutate(quant = factor(quant, levels = c("q50","q75","q90","q95","q99")))
+  
+  p <- ggplot(D, aes(x = quant, y = 100*frac, fill = model_name)) +
+    geom_col(position = position_dodge(width = 0.6), width = 0.6) +
+    scale_fill_nature(name = "Model") +
+    labs(x = "Ensemble percentile", y = "Basins where GRACE exceeds (%)",
+         title = "Population exceedance of ensemble percentiles (Amplitude)") +
+    theme_nature()
+  
+  save_nature_figure(p, out_file, width_type = "single", dpi = 400, format = "pdf")
+  invisible(p)
+}
+fig_Q12_population_exceedance(amplsd_aug, file.path(out_dir, "Q12_population_exceedance.pdf"))
+
+```
+
+```{r Q17 — Cross‑model failure overlap (map)}
+fig_Q17_cross_model_consistency <- function(MET, basins_sf, out_file = "Q17_cross_model_consistency.pdf") {
+  D <- MET %>%
+    mutate(fail_amp = cover_amp_5_95 == 0L,
+           fail_sd  = cover_sd_5_95  == 0L,
+           fail_any = fail_amp | fail_sd) %>%
+    dplyr::select(bd_ID, model_name, fail_any) %>%
+    pivot_wider(names_from = model_name, values_from = fail_any) %>%
+    mutate(consistency = case_when(
+      CESM2 & IPSL  ~ "Both fail",
+      CESM2 & !IPSL ~ "CESM2 only",
+      !CESM2 & IPSL ~ "IPSL only",
+      TRUE          ~ "Both pass"
+    ))
+  
+  pal <- c("Both fail"="#b2182b","CESM2 only"="#ef8a62","IPSL only"="#67a9cf","Both pass"="#2166ac")
+  
+  sfm <- merge_to_sf(basins_sf, D, keep_cols = c("consistency"))
+  
+  p <- ggplot() +
+    get_world_robin()$geoms$world +
+    geom_sf(data = st_transform(sfm, robin_crs()),
+            aes(fill = consistency), color = NA, size = 0.1) +
+    scale_fill_manual(values = pal, name = NULL) +
+    coord_sf(crs = robin_crs(), expand = FALSE) +
+    theme_nature_map() +
+    labs(title = "Cross‑model consistency of envelope failures (amp or σ)")
+  
+  save_nature_figure(p, out_file, width_type = "double", dpi = 400, format = "pdf")
+  invisible(p)
+}
+
+```
+```{r 13 Driver to render all figures (Q1–Q12)}
+# 0) Your themes/utilities must already be defined in session:
+# - theme_nature, theme_nature_map, add_panel_label, plot_robin_map, save_nature_figure
+
+# 1) Standardize inputs (no errors now)
+amplsd_aug <- std_cols(amplsd_aug)
+basins_sf  <- std_cols(basins_sf)
+
+# 2) Build derived metrics
+M <- build_metrics(amplsd_aug)
+
+# 3) Generate figures (edit filenames or set to NULL if you don't want to write)
+fig_Q1_ratio_maps(M, basins_sf, out_file = "Q1_ratio_maps.pdf")
+fig_Q2_bias_counts(M, out_file = "Q2_bias_counts.pdf")
+fig_Q3_joint_scatter(M, out_file = "Q3_joint_scatter.pdf")
+fig_Q4_member_realism(M, out_file = "Q4_member_realism.pdf")
+fig_Q5_pit_hist(M, out_file = "Q5_pit_hist.pdf")
+fig_Q6_controls(M, out_file = "Q6_controls.pdf")
+fig_Q7_window_robustness(M, out_file = "Q7_window_robustness.pdf")
+fig_Q8_extreme_coverage_maps(M, basins_sf, out_file = "Q8_extreme_coverage_maps.pdf")
+fig_Q9_tail_distance(M, out_file = "Q9_tail_distance.pdf")
+fig_Q10_asymmetry(M, basins_sf, out_file = "Q10_asymmetry.pdf")
+fig_Q11_dispersion_link(M, out_file = "Q11_dispersion_link.pdf")
+fig_Q12_population_exceedance(M, out_file = "Q12_population_exceedance.pdf")
+fig_Q17_cross_model_overlap(M, basins_sf, out_file = "Q17_cross_model_overlap.pdf")
+```
+
+```{r Consitencey of members}
+library(dplyr)
+library(purrr)
+library(sf)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(rnaturalearth)
+# ---------------------------------------------------------
+# Colors (Wong palette as in your theme)
+# ---------------------------------------------------------
+col_cesm <- "#0072B2"  # CESM2 blue
+col_ipsl <- "#E69F00"  # IPSL orange
+col_grace <- "#666666" # GRACE gray (for reference if needed)
+
+# ---------------------------------------------------------
+# Robinson projection helpers (minimal)
+# ---------------------------------------------------------
+robin_crs <- function() sf::st_crs("+proj=robin")
+
+get_world_robin <- function(fill = "grey95",
+                            colour = "grey80",
+                            linewidth = 0.1,
+                            add_graticules = FALSE) {
+  world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+  world_robin <- sf::st_transform(world, robin_crs())
+  list(
+    geoms = list(
+      world = ggplot2::geom_sf(data = world_robin,
+                               fill = fill, colour = colour, linewidth = linewidth)
+    )
+  )
+}
+
+# ---------------------------------------------------------
+# Nature-like minimal map theme (axes off, clean border)
+# ---------------------------------------------------------
+theme_nature_map <- function(base_size = 6, base_family = "Helvetica") {
+  ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
+    ggplot2::theme(
+      panel.grid       = element_blank(),
+      axis.text        = element_blank(),
+      axis.title       = element_blank(),
+      axis.ticks       = element_blank(),
+      legend.position  = "top",
+      legend.justification = "left",
+      legend.title     = element_text(face = "bold"),
+      plot.title       = element_text(face = "bold", hjust = 0.5),
+      panel.border     = element_rect(color = "black", fill = NA, linewidth = 0.3),
+      plot.background  = element_rect(fill = "white", color = NA)
+    )
+}
+
+# ---------------------------------------------------------
+# Size helper for saving at Nature widths (mm → in)
+# ---------------------------------------------------------
+nature_figure_size <- function(width_type = "double") {
+  mm_to_in <- 1/25.4
+  sizes <- list(
+    single = list(width = 89 * mm_to_in, height = 89 * mm_to_in),
+    double = list(width = 180 * mm_to_in, height = 120 * mm_to_in) # compact height
+  )
+  sizes[[width_type]]
+}
+
+# ---------------------------------------------------------
+# 1) Compute member-level consistency fractions (no extra stats)
+#    - amp consistency: |member_amp - GRACE_amp| <= tol * GRACE_amp
+#    - min coverage:     member_min <= GRACE_min
+#    - max coverage:     member_max >= GRACE_max
+# ---------------------------------------------------------
+compute_consistency <- function(amplsd_aug, amp_tol = 0.20) {
+  stopifnot(all(c("bd_ID","model_name","amp_grace","min_grace","max_grace") %in% names(amplsd_aug)))
+  need_lists <- c("amp_ens","min_ens","max_ens")
+  miss <- setdiff(need_lists, names(amplsd_aug))
+  if (length(miss)) stop("Missing list columns in amplsd_aug: ", paste(miss, collapse = ", "))
+
+  amplsd_aug %>%
+    mutate(
+      frac_amp = purrr::map2_dbl(amp_ens, amp_grace, ~{
+        v <- as.numeric(.x); g <- as.numeric(.y)
+        if (!is.finite(g) || length(v) == 0) return(NA_real_)
+        good <- is.finite(v) & (v >= (1 - amp_tol)*g) & (v <= (1 + amp_tol)*g)
+        mean(good, na.rm = TRUE)
+      }),
+      n_amp = purrr::map_int(amp_ens, ~sum(is.finite(as.numeric(.x)))),
+
+      frac_min = purrr::map2_dbl(min_ens, min_grace, ~{
+        v <- as.numeric(.x); g <- as.numeric(.y)
+        if (!is.finite(g) || length(v) == 0) return(NA_real_)
+        good <- is.finite(v) & (v <= g)
+        mean(good, na.rm = TRUE)
+      }),
+      n_min = purrr::map_int(min_ens, ~sum(is.finite(as.numeric(.x)))),
+
+      frac_max = purrr::map2_dbl(max_ens, max_grace, ~{
+        v <- as.numeric(.x); g <- as.numeric(.y)
+        if (!is.finite(g) || length(v) == 0) return(NA_real_)
+        good <- is.finite(v) & (v >= g)
+        mean(good, na.rm = TRUE)
+      }),
+      n_max = purrr::map_int(max_ens, ~sum(is.finite(as.numeric(.x))))
+    ) %>%
+    dplyr::select(bd_ID, model_name, frac_amp, n_amp, frac_min, n_min, frac_max, n_max)
+}
+
+# ---------------------------------------------------------
+# 2) Safe merge helper (joins by bd_ID; accepts bd_id in basins_sf)
+# ---------------------------------------------------------
+merge_to_sf <- function(basins_sf, metrics_df) {
+  stopifnot(inherits(basins_sf, "sf"))
+  bdf <- basins_sf
+  if (!("bd_ID" %in% names(bdf))) {
+    if ("bd_id" %in% names(bdf)) {
+      bdf <- dplyr::rename(bdf, bd_ID = bd_id)
+    } else {
+      stop("basins_sf must have 'bd_ID' (or 'bd_id').")
+    }
+  }
+  dplyr::left_join(bdf, metrics_df, by = "bd_ID")
+}
+
+# ---------------------------------------------------------
+# 3) Two-panel (CESM2/IPSL) map for a given fraction metric
+# ---------------------------------------------------------
+plot_consistency_maps <- function(cons_df, basins_sf,
+                                  metric = c("frac_amp","frac_min","frac_max"),
+                                  title = "",
+                                  out_file = "figure.pdf") {
+  metric <- match.arg(metric)
+  # Prepare per-model frames
+  df_use <- cons_df %>% dplyr::select(bd_ID, model_name, !!rlang::sym(metric))
+  sf_all <- merge_to_sf(basins_sf, df_use)
+  sf_cesm <- sf_all %>% dplyr::filter(model_name == "CESM2")
+  sf_ipsl <- sf_all %>% dplyr::filter(model_name == "IPSL")
+
+  world_bg <- get_world_robin(add_graticules = FALSE)
+
+  p_cesm <- ggplot() +
+    world_bg$geoms$world +
+    geom_sf(data = sf::st_transform(sf_cesm, robin_crs()),
+            aes(fill = !!rlang::sym(metric)), color = NA, linewidth = 0.05) +
+    scale_fill_gradient(limits = c(0, 1), low = "white", high = col_cesm,
+                        name = "fraction") +
+    coord_sf(crs = robin_crs(), expand = FALSE) +
+    labs(title = "CESM2") +
+    theme_nature_map()
+
+  p_ipsl <- ggplot() +
+    world_bg$geoms$world +
+    geom_sf(data = sf::st_transform(sf_ipsl, robin_crs()),
+            aes(fill = !!rlang::sym(metric)), color = NA, linewidth = 0.05) +
+    scale_fill_gradient(limits = c(0, 1), low = "white", high = col_ipsl,
+                        name = "fraction") +
+    coord_sf(crs = robin_crs(), expand = FALSE) +
+    labs(title = "IPSL") +
+    theme_nature_map()
+
+  top_title <- grid::textGrob(title, gp = grid::gpar(fontface = "bold"))
+  g <- gridExtra::grid.arrange(p_cesm, p_ipsl, ncol = 2, top = top_title)
+
+  sz <- nature_figure_size("double")
+  ggsave(out_file, g, width = sz$width, height = sz$height, dpi = 400, units = "in")
+  invisible(g)
+}
+
+# ---------------------------------------------------------
+# -------- RUN (uses your objects amplsd_aug and basins_sf) --------
+# ---------------------------------------------------------
+CONS <- compute_consistency(amplsd_aug, amp_tol = 0.20)
+
+# 1) Amplitude consistency (±20% vs GRACE)
+plot_consistency_maps(
+  CONS, basins_sf,
+  metric = "frac_amp",
+  title = "Amplitude consistency (share of members within ±20% of GRACE)",
+  out_file = "Q_amp_consistency.pdf"
+)
+
+# 2) Drought (minimum) coverage
+plot_consistency_maps(
+  CONS, basins_sf,
+  metric = "frac_min",
+  title = "Drought coverage (share of members reaching GRACE minimum)",
+  out_file = "Q_min_coverage.pdf"
+)
+
+# 3) Pluvial (maximum) coverage
+plot_consistency_maps(
+  CONS, basins_sf,
+  metric = "frac_max",
+  title = "Pluvial coverage (share of members reaching GRACE maximum)",
+  out_file = "Q_max_coverage.pdf"
+)
+
+```

@@ -1,0 +1,82 @@
+TWS Analysis Framework - Directory Structure
+=============================================
+
+refactored_r_code/
+│
+├── README.md                      # Main repository documentation
+├── GETTING_STARTED.md             # Quick start guide with examples
+├── FUNCTION_CATALOG.md            # Complete function reference
+├── PROJECT_SUMMARY.md             # Refactoring overview and summary
+├── DIRECTORY_STRUCTURE.txt        # This file
+├── LICENSE                        # MIT License
+│
+├── core_analysis/                 # Main analysis entry points
+│   ├── analyze_basin_tws.R
+│   ├── analyze_multiple_basins_parallel.R
+│   └── extract_result_by_type.R
+│
+├── data_processing/               # Data extraction and formatting
+│   ├── attach_basin_attributes.R
+│   ├── convert_interpretation_to_dataframe.R
+│   ├── extract_all_analysis_results.R
+│   └── extract_and_merge_spatial_data.R
+│
+├── ensemble_metrics/              # Statistical calculations
+│   ├── calculate_ensemble_spread_metrics.R
+│   ├── calculate_row_metrics.R
+│   └── summarize_vector_statistics.R
+│
+├── extreme_analysis/              # Extreme event analysis
+│   ├── analyze_extreme_event_coverage.R
+│   ├── interpret_extreme_analysis.R
+│   └── process_extreme_results.R
+│
+├── figures/                       # Manuscript figure generation
+│   ├── create_amplitude_variance_figure.R
+│   ├── create_basin_summary_figure.R
+│   ├── create_ensemble_spread_figure.R
+│   ├── create_extreme_coverage_figure.R
+│   ├── create_model_comparison_figure.R
+│   ├── create_model_skill_figure.R
+│   ├── create_spectral_analysis_figure.R
+│   ├── create_temporal_patterns_figure.R
+│   ├── create_wavelet_power_figure.R
+│   └── generate_all_manuscript_figures.R
+│
+├── interpretation/                # Qualitative interpretation
+│   └── interpret_model_performance.R
+│
+├── mapping/                       # Geographic visualization
+│   ├── create_main_analysis_figure.R
+│   ├── create_robinson_projection_map.R
+│   ├── generate_all_spatial_maps.R
+│   ├── get_robinson_projection_crs.R
+│   ├── get_world_basemap_robinson.R
+│   └── plot_cesm_data_robinson.R
+│
+├── utilities/                     # Helper functions
+│   ├── bin_continuous_variable.R
+│   ├── classify_model_data_ratio.R
+│   └── safely_rename_column.R
+│
+├── visualization/                 # Plotting themes and utilities
+│   ├── add_figure_panel_label.R
+│   ├── apply_nature_color_scale.R
+│   ├── apply_nature_fill_scale.R
+│   ├── apply_nature_journal_theme.R
+│   ├── apply_nature_map_theme.R
+│   ├── get_nature_figure_dimensions.R
+│   └── save_figure_nature_format.R
+│
+└── wavelet_analysis/              # Spectral analysis pipeline
+    ├── assess_ensemble_spectral_consistency.R
+    ├── classify_temporal_period.R
+    ├── evaluate_dominant_mode_reproduction.R
+    ├── evaluate_timescale_representation.R
+    ├── extract_top_spectral_periods.R
+    ├── identify_dominant_spectral_modes.R
+    ├── perform_ensemble_wavelet_analysis.R
+    └── summarize_wavelet_analysis_results.R
+
+Total: 10 categories, 48 functions, 5 documentation files
+
