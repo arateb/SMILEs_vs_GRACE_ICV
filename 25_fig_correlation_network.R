@@ -41,7 +41,7 @@ cat("  Correlation matrix:", nrow(C_grace), "x", ncol(C_grace), "\n")
 cat("  Basin info:", nrow(basin_info), "basins\n\n")
 
 # Load basin shapefile
-basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
 basins_shp <- st_make_valid(basins_shp)
 basins_shp <- st_simplify(basins_shp, dTolerance = 0.1, preserveTopology = TRUE)
 

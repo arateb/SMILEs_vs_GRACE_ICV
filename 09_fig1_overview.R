@@ -30,7 +30,7 @@ disp <- readRDS("outputs/dispersion_summary.rds")
 
 # Load basin shapefile
 cat("Loading basin shapefile...\n")
-basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
 basins_shp <- st_make_valid(basins_shp)
 
 # Simplify geometries to reduce PDF file size (tolerance = 0.1 degrees ~ 10km)

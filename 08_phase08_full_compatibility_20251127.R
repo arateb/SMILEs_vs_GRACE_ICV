@@ -111,7 +111,7 @@ cat("  Loaded basin attributes:", nrow(attrs), "basins\n")
 if (file.exists(file.path(OUTPUT_DIR, "basin_polygons.rds"))) {
   basins_shp <- readRDS(file.path(OUTPUT_DIR, "basin_polygons.rds"))
 } else {
-  basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+  basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
   basins_shp <- st_make_valid(basins_shp)
 }
 

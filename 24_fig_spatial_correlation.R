@@ -35,7 +35,7 @@ basin_summary <- readRDS("outputs/phase07_corr_basin_summary.rds")
 cat("  Basin summary:", nrow(basin_summary), "basins\n\n")
 
 # Load basin shapefile
-basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
 basins_shp <- st_make_valid(basins_shp)
 basins_shp <- st_simplify(basins_shp, dTolerance = 0.1, preserveTopology = TRUE)
 

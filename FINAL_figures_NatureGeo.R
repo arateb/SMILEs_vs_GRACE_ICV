@@ -126,7 +126,7 @@ compat <- fread("outputs/phase08_compatibility_basin.csv")
 
 # Basin shapefile
 cat("Loading shapefile...\n")
-basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
 basins_shp <- st_make_valid(basins_shp)
 basins_shp <- st_simplify(basins_shp, dTolerance = 0.1, preserveTopology = TRUE)
 

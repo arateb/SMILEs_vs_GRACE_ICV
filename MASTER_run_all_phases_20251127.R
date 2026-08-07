@@ -71,7 +71,7 @@ cat("  Basins:", nrow(attrs), "\n\n")
 
 # Load basin shapefile for maps
 cat("Loading basin shapefile...\n")
-basins_shp <- st_read("/Volumes/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
+basins_shp <- st_read("/data/Vector/Global/Gbasins/FinalGbasins_April25.shp", quiet = TRUE)
 basins_shp <- st_make_valid(basins_shp)
 cat("  Basins in shapefile:", nrow(basins_shp), "\n\n")
 
